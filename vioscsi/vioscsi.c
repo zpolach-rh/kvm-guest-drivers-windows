@@ -1924,21 +1924,23 @@ VOID VioScsiIoControl(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
     EXIT_FN_SRB();
 }
 
-UCHAR
+USHORT
 ParseIdentificationDescr(IN PVOID DeviceExtension,
                          IN PVPD_IDENTIFICATION_DESCRIPTOR IdentificationDescr,
-                         IN UCHAR PageLength)
+                         IN USHORT PageLength)
 {
     PADAPTER_EXTENSION adaptExt;
     UCHAR CodeSet = 0;
     UCHAR IdentifierType = 0;
+    UCHAR Association = 0;
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     ENTER_FN();
     if (IdentificationDescr)
     {
         CodeSet = IdentificationDescr->CodeSet;               //(UCHAR)(((PCHAR)IdentificationDescr)[0]);
         IdentifierType = IdentificationDescr->IdentifierType; //(UCHAR)(((PCHAR)IdentificationDescr)[1]);
-        if (PageLength < IdentificationDescr->IdentifierLength)
+        Association = IdentificationDescr->Association;
+        if (PageLength < sizeof(VPD_IDENTIFICATION_DESCRIPTOR) + IdentificationDescr->IdentifierLength)
         {
             RhelDbgPrint(TRACE_LEVEL_INFORMATION,
                          " Skipping VPD identifier's descriptor as its length"
@@ -1954,18 +1956,45 @@ ParseIdentificationDescr(IN PVOID DeviceExtension,
                 {
                     if (CodeSet == VioscsiVpdCodeSetAscii)
                     {
-                        if (IdentificationDescr->IdentifierLength > 0 && adaptExt->ser_num == NULL)
+                        // A short/truncated first INQUIRY (small allocation length) can yield a shorter,
+                        // internally-consistent identifier. Keep the longest one seen so a later, complete
+                        // response can still replace an earlier truncated one, instead of latching forever.
+                        ULONG newSerialNumLen = min(64, IdentificationDescr->IdentifierLength);
+
+                        if (adaptExt->ser_num != NULL)
                         {
-                            int ln = min(64, IdentificationDescr->IdentifierLength);
+                            // strnlen is capped at 64, so it always fits ULONG without truncation.
+                            ULONG currentSerialNumLen = (ULONG)strnlen((PCHAR)adaptExt->ser_num, 64);
+
+                            if (newSerialNumLen > currentSerialNumLen)
+                            {
+                                StorPortFreePool(DeviceExtension, (PVOID)adaptExt->ser_num);
+                                adaptExt->ser_num = NULL;
+                            }
+                        }
+
+                        if (newSerialNumLen > 0 && adaptExt->ser_num == NULL)
+                        {
+                            PUCHAR newSerNum = NULL;
                             ULONG Status = StorPortAllocatePool(DeviceExtension,
-                                                                ln + 1,
+                                                                newSerialNumLen + 1,
                                                                 VIOSCSI_POOL_TAG,
-                                                                (PVOID *)&adaptExt->ser_num);
+                                                                (PVOID *)&newSerNum);
                             if (NT_SUCCESS(Status))
                             {
-                                StorPortMoveMemory(adaptExt->ser_num, IdentificationDescr->Identifier, ln);
-                                adaptExt->ser_num[ln] = '\0';
+                                StorPortMoveMemory(newSerNum, IdentificationDescr->Identifier, newSerialNumLen);
+                                newSerNum[newSerialNumLen] = '\0';
+
+                                adaptExt->ser_num = newSerNum;
                                 RhelDbgPrint(TRACE_LEVEL_INFORMATION, " serial number %s\n", adaptExt->ser_num);
+                            }
+                            else
+                            {
+                                RhelDbgPrint(TRACE_LEVEL_ERROR,
+                                             " Failed to allocate memory for serial number (Status: 0x%x, size: "
+                                             "%u)\n",
+                                             Status,
+                                             newSerialNumLen + 1);
                             }
                         }
                     }
@@ -1973,27 +2002,26 @@ ParseIdentificationDescr(IN PVOID DeviceExtension,
                 break;
             case VioscsiVpdIdentifierTypeFCPHName:
                 {
+                    // NAA identifier: Association tells us whether it names the logical unit or the target port.
                     if ((CodeSet == VioscsiVpdCodeSetBinary) &&
                         (IdentificationDescr->IdentifierLength == sizeof(ULONGLONG)))
                     {
-                        REVERSE_BYTES_QUAD(&adaptExt->wwn, IdentificationDescr->Identifier);
-                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " wwn %llu\n", (ULONGLONG)adaptExt->wwn);
-                    }
-                }
-                break;
-            case VioscsiVpdIdentifierTypeFCTargetPortPHName:
-                {
-                    if ((CodeSet == VioscsiVpdCodeSetSASBinary) &&
-                        (IdentificationDescr->IdentifierLength == sizeof(ULONGLONG)))
-                    {
-                        REVERSE_BYTES_QUAD(&adaptExt->port_wwn, IdentificationDescr->Identifier);
-                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " port wwn %llu\n", (ULONGLONG)adaptExt->port_wwn);
+                        if (Association == VioscsiVpdAssociationLogicalUnit)
+                        {
+                            REVERSE_BYTES_QUAD(&adaptExt->wwn, IdentificationDescr->Identifier);
+                            RhelDbgPrint(TRACE_LEVEL_INFORMATION, " wwn %llu\n", (ULONGLONG)adaptExt->wwn);
+                        }
+                        else if (Association == VioscsiVpdAssociationTargetPort)
+                        {
+                            REVERSE_BYTES_QUAD(&adaptExt->port_wwn, IdentificationDescr->Identifier);
+                            RhelDbgPrint(TRACE_LEVEL_INFORMATION, " port wwn %llu\n", (ULONGLONG)adaptExt->port_wwn);
+                        }
                     }
                 }
                 break;
             case VioscsiVpdIdentifierTypeFCTargetPortRelativeTargetPort:
                 {
-                    if ((CodeSet == VioscsiVpdCodeSetSASBinary) &&
+                    if ((CodeSet == VioscsiVpdCodeSetBinary) &&
                         (IdentificationDescr->IdentifierLength == sizeof(ULONG)))
                     {
                         REVERSE_BYTES(&adaptExt->port_idx, IdentificationDescr->Identifier);
@@ -2020,27 +2048,25 @@ VOID VioScsiSaveInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
     UCHAR SrbStatus = SRB_STATUS_SUCCESS;
     ENTER_FN_SRB();
 
-    if (!Srb)
+    if (!Srb || !DeviceExtension)
     {
         return;
     }
 
     cdb = SRB_CDB(Srb);
-
-    if (!cdb)
+    dataBuffer = SRB_DATA_BUFFER(Srb);
+    dataLen = SRB_DATA_TRANSFER_LENGTH(Srb);
+    // Validate cdb structure. Do not touch invalid data at all
+    if (!cdb || !dataBuffer || dataLen < INQUIRYDATABUFFERSIZE)
     {
         return;
     }
-
     SRB_GET_SCSI_STATUS(Srb, SrbStatus);
     if (SrbStatus == SRB_STATUS_ERROR)
     {
         return;
     }
-
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
-    dataBuffer = SRB_DATA_BUFFER(Srb);
-    dataLen = SRB_DATA_TRANSFER_LENGTH(Srb);
 
     if (cdb->CDB6INQUIRY3.EnableVitalProductData == 1)
     {
@@ -2048,23 +2074,60 @@ VOID VioScsiSaveInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
         {
             case VPD_SERIAL_NUMBER:
                 {
-                    PVPD_SERIAL_NUMBER_PAGE SerialPage;
-                    SerialPage = (PVPD_SERIAL_NUMBER_PAGE)dataBuffer;
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION,
-                                 " VPD_SERIAL_NUMBER PageLength = %d\n",
-                                 SerialPage->PageLength);
-                    if (SerialPage->PageLength > 0 && adaptExt->ser_num == NULL)
+                    // Check if we have enough data for the Serial Number Page header
+                    if (dataLen >= sizeof(VPD_SERIAL_NUMBER_PAGE))
                     {
-                        int ln = min(64, SerialPage->PageLength);
-                        ULONG Status = StorPortAllocatePool(DeviceExtension,
-                                                            ln + 1,
-                                                            VIOSCSI_POOL_TAG,
-                                                            (PVOID *)&adaptExt->ser_num);
-                        if (NT_SUCCESS(Status))
+                        PVPD_SERIAL_NUMBER_PAGE SerialPage = (PVPD_SERIAL_NUMBER_PAGE)dataBuffer;
+
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION,
+                                     " VPD_SERIAL_NUMBER PageLength = %d\n",
+                                     SerialPage->PageLength);
+
+                        if (SerialPage->PageLength > 0)
                         {
-                            StorPortMoveMemory(adaptExt->ser_num, SerialPage->SerialNumber, ln);
-                            adaptExt->ser_num[ln] = '\0';
-                            RhelDbgPrint(TRACE_LEVEL_INFORMATION, " serial number %s\n", adaptExt->ser_num);
+                            ULONG availableBytes = dataLen - sizeof(VPD_SERIAL_NUMBER_PAGE);
+                            ULONG bytesToCopy = min((ULONG)SerialPage->PageLength, availableBytes);
+                            ULONG newSerialNumLen = min(64, bytesToCopy);
+
+                            // Check if we have an existing cached serial number
+                            if (adaptExt->ser_num != NULL)
+                            {
+                                // Determine current cached string length with maximum bounds protection
+                                SIZE_T currentSerialNumLen = strnlen((PCHAR)adaptExt->ser_num, 64);
+
+                                // If the new inquiry brings a longer serial number, free the old short one first
+                                if (newSerialNumLen > currentSerialNumLen)
+                                {
+                                    StorPortFreePool(DeviceExtension, (PVOID)adaptExt->ser_num);
+                                    adaptExt->ser_num = NULL;
+                                }
+                            }
+
+                            // Allocate and copy the new serial number if needed
+                            if (newSerialNumLen > 0 && adaptExt->ser_num == NULL)
+                            {
+                                PUCHAR newSerNum = NULL;
+                                ULONG Status = StorPortAllocatePool(DeviceExtension,
+                                                                    newSerialNumLen + 1,
+                                                                    VIOSCSI_POOL_TAG,
+                                                                    (PVOID *)&newSerNum);
+                                if (NT_SUCCESS(Status))
+                                {
+                                    StorPortMoveMemory(newSerNum, SerialPage->SerialNumber, newSerialNumLen);
+                                    newSerNum[newSerialNumLen] = '\0';
+
+                                    adaptExt->ser_num = newSerNum;
+                                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " serial number %s\n", adaptExt->ser_num);
+                                }
+                                else
+                                {
+                                    RhelDbgPrint(TRACE_LEVEL_ERROR,
+                                                 " Failed to allocate memory for serial number (Status: 0x%x, size: "
+                                                 "%u)\n",
+                                                 Status,
+                                                 newSerialNumLen + 1);
+                                }
+                            }
                         }
                     }
                 }
@@ -2073,40 +2136,49 @@ VOID VioScsiSaveInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
                 {
                     PVPD_IDENTIFICATION_PAGE IdentificationPage;
                     PVPD_IDENTIFICATION_DESCRIPTOR IdentificationDescr;
-                    UCHAR PageLength = 0;
+                    USHORT PageLength = 0;
                     IdentificationPage = (PVPD_IDENTIFICATION_PAGE)dataBuffer;
-                    PageLength = min((UCHAR)(dataLen & 0xFF) - sizeof(VPD_IDENTIFICATION_PAGE),
-                                     IdentificationPage->PageLength);
                     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " SRB's DataTransferLength: 0x%x\n", dataLen);
-                    RhelDbgPrint(TRACE_LEVEL_VERBOSE,
-                                 " Identification page's length: 0x%x\n",
-                                 IdentificationPage->PageLength);
-                    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Total PageLength: 0x%x\n", PageLength);
-                    if (PageLength >= sizeof(VPD_IDENTIFICATION_DESCRIPTOR))
+                    if (dataLen >= sizeof(VPD_IDENTIFICATION_PAGE))
                     {
-                        UCHAR IdentifierLength = 0;
-                        IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)IdentificationPage->Descriptors;
-                        do
+                        size_t available = dataLen - sizeof(VPD_IDENTIFICATION_PAGE);
+                        // IdentificationPage->PageLength is a UCHAR, so the result is always <= 255 and fits USHORT.
+                        PageLength = (USHORT)min(available, IdentificationPage->PageLength);
+                        RhelDbgPrint(TRACE_LEVEL_VERBOSE,
+                                     " Identification page's length: 0x%x\n",
+                                     IdentificationPage->PageLength);
+                        RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Total PageLength: 0x%x\n", PageLength);
+                        if (PageLength >= sizeof(VPD_IDENTIFICATION_DESCRIPTOR))
                         {
-                            UCHAR offset = 0;
-                            IdentifierLength = ParseIdentificationDescr(DeviceExtension,
-                                                                        IdentificationDescr,
-                                                                        PageLength);
-                            offset = sizeof(VPD_IDENTIFICATION_DESCRIPTOR) + IdentifierLength;
-                            PageLength -= min(PageLength, offset);
-                            IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)((ULONG_PTR)IdentificationDescr +
-                                                                                   offset);
-                            RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Remaining PageLength: 0x%x\n", PageLength);
-                        } while (PageLength >= sizeof(VPD_IDENTIFICATION_DESCRIPTOR));
+                            USHORT IdentifierLength = 0;
+                            IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)IdentificationPage->Descriptors;
+                            do
+                            {
+                                USHORT offset = 0;
+                                IdentifierLength = ParseIdentificationDescr(DeviceExtension,
+                                                                            IdentificationDescr,
+                                                                            PageLength);
+                                offset = (USHORT)sizeof(VPD_IDENTIFICATION_DESCRIPTOR) + IdentifierLength;
+                                PageLength -= min(PageLength, offset);
+                                IdentificationDescr = (PVPD_IDENTIFICATION_DESCRIPTOR)((ULONG_PTR)IdentificationDescr +
+                                                                                       offset);
+                                RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Remaining PageLength: 0x%x\n", PageLength);
+                            } while (PageLength >= sizeof(VPD_IDENTIFICATION_DESCRIPTOR));
+                        }
                     }
                 }
                 break;
         }
     }
-    else if (cdb->CDB6INQUIRY3.PageCode == VPD_SUPPORTED_PAGES)
+    else
     {
+        // Process Standard INQUIRY response (EVPD == 0).
+        // Extracts basic device identity strings: Vendor ID (8B), Product ID (16B), and Revision Level (4B).
+        // Memory bounds are validated using FIELD_OFFSET to ensure dataLen reaches at least the end of
+        // ProductRevisionLevel (36 bytes total), preventing out-of-bounds reads on probe responses
         PINQUIRYDATA InquiryData = (PINQUIRYDATA)dataBuffer;
-        if (InquiryData && dataLen)
+        if (InquiryData &&
+            dataLen >= FIELD_OFFSET(INQUIRYDATA, ProductRevisionLevel) + sizeof(InquiryData->ProductRevisionLevel))
         {
             CopyBufferToAnsiString(adaptExt->ven_id, InquiryData->VendorId, ' ', sizeof(InquiryData->VendorId));
             CopyBufferToAnsiString(adaptExt->prod_id, InquiryData->ProductId, ' ', sizeof(InquiryData->ProductId));
