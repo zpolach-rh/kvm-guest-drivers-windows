@@ -1180,6 +1180,16 @@ VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
                 if (CHECKBIT(adaptExt->features, VIRTIO_BLK_F_RO))
                 {
                     UCHAR SrbStatus = SRB_STATUS_ERROR;
+                    STOR_LOCK_HANDLE lockHandle = {0};
+
+                    /*
+                     * adaptExt->sense_info is adapter-wide and VirtIoStartIo
+                     * runs concurrently across queues once
+                     * STOR_PERF_CONCURRENT_CHANNELS is negotiated; take
+                     * InterruptLock around the write and the SetSenseInfo()
+                     * read-back, matching VirtIoHwReinitialize().
+                     */
+                    StorPortAcquireSpinLock(DeviceExtension, InterruptLock, NULL, &lockHandle);
                     adaptExt->sense_info.senseKey = SCSI_SENSE_DATA_PROTECT;
                     adaptExt->sense_info.additionalSenseCode = SCSI_ADSENSE_WRITE_PROTECT;
                     adaptExt->sense_info.additionalSenseCodeQualifier = SCSI_SENSEQ_SPACE_ALLOC_FAILED_WRITE_PROTECT; // SCSI_ADSENSE_NO_SENSE;
@@ -1187,6 +1197,7 @@ VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
                     {
                         SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
                     }
+                    StorPortReleaseSpinLock(DeviceExtension, &lockHandle);
                     CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SrbStatus);
                     return TRUE;
                 }
