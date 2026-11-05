@@ -1235,6 +1235,14 @@ VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
                 UCHAR SrbStatus = RhelScsiVerify(DeviceExtension, (PSRB_TYPE)Srb);
                 if (SrbStatus == SRB_STATUS_INVALID_REQUEST)
                 {
+                    STOR_LOCK_HANDLE lockHandle = {0};
+
+                    /*
+                     * See the InterruptLock comment on the SCSIOP_WRITE
+                     * branch above - same adapter-wide sense_info race,
+                     * independent call site.
+                     */
+                    StorPortAcquireSpinLock(DeviceExtension, InterruptLock, NULL, &lockHandle);
                     SrbStatus = SRB_STATUS_ERROR;
                     adaptExt->sense_info.senseKey = SCSI_SENSE_ILLEGAL_REQUEST;
                     adaptExt->sense_info.additionalSenseCode = SCSI_ADSENSE_INVALID_CDB;
@@ -1243,6 +1251,7 @@ VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
                     {
                         SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
                     }
+                    StorPortReleaseSpinLock(DeviceExtension, &lockHandle);
                 }
                 CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SrbStatus);
                 return TRUE;
