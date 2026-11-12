@@ -2203,6 +2203,17 @@ VOID CompleteRequestWithStatus(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN UC
                  * no lock needed, unlike StorPortAcquireSpinLock(InterruptLock),
                  * and safe to call from any context, including bIsr-style
                  * direct-ISR completion.
+                 *
+                 * Deliberately not put back if SetSenseInfo() fails (SRB
+                 * sense buffer missing/too small, essentially never seen in
+                 * practice): once taken via InterlockedExchange(), the value
+                 * read here is already gone from pending_sense_info, so a
+                 * compare-and-swap restore keyed on "still 0" cannot tell
+                 * "nothing happened since" from "a newer notification
+                 * arrived and was already consumed" (ABA) - it could
+                 * resurrect this stale value over a newer one that's
+                 * already been delivered. Losing a notification on this
+                 * near-unreachable failure path is the safer trade-off.
                  */
                 LONG packed = InterlockedExchange(&adaptExt->pending_sense_info, 0);
 
@@ -2214,16 +2225,6 @@ VOID CompleteRequestWithStatus(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN UC
                     if (SetSenseInfo(DeviceExtension, Srb, &senseInfo))
                     {
                         status = SRB_STATUS_ERROR | SRB_STATUS_AUTOSENSE_VALID;
-                    }
-                    else
-                    {
-                        /*
-                         * This SRB's sense buffer couldn't take it - put the
-                         * notification back for a later SRB instead of
-                         * losing it, unless a newer one has since replaced
-                         * it (then the newer one wins, which is fine).
-                         */
-                        InterlockedCompareExchange(&adaptExt->pending_sense_info, packed, 0);
                     }
                 }
             }
