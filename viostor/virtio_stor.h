@@ -251,7 +251,6 @@ typedef struct _ADAPTER_EXTENSION
     ULONG perfFlags;
     PSTOR_DPC dpc;
     BOOLEAN dpc_ok;
-    BOOLEAN check_condition;
     SENSE_INFO sense_info;
     BOOLEAN removed;
     BOOLEAN stopped;

@@ -1285,13 +1285,21 @@ VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 
 static VOID VirtIoConfigUpdated(PADAPTER_EXTENSION adaptExt)
 {
+    SENSE_INFO senseInfo = {0};
+
     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Device Config Interrupt\n");
 
     RhelGetDiskGeometry(adaptExt);
-    adaptExt->sense_info.senseKey = SCSI_SENSE_UNIT_ATTENTION;
-    adaptExt->sense_info.additionalSenseCode = SCSI_ADSENSE_PARAMETERS_CHANGED;
-    adaptExt->sense_info.additionalSenseCodeQualifier = SCSI_SENSEQ_CAPACITY_DATA_CHANGED;
-    adaptExt->check_condition = TRUE;
+    senseInfo.senseKey = SCSI_SENSE_UNIT_ATTENTION;
+    senseInfo.additionalSenseCode = SCSI_ADSENSE_PARAMETERS_CHANGED;
+    senseInfo.additionalSenseCodeQualifier = SCSI_SENSEQ_CAPACITY_DATA_CHANGED;
+    /*
+     * Lock-free: this runs inside HwStorInterrupt/HwMSIInterruptRoutine
+     * concurrently with VirtIoHwReinitialize()'s InterlockedExchange() on
+     * another CPU/queue - InterlockedExchange() needs no lock on either
+     * side, unlike the StorPortAcquireSpinLock(InterruptLock) approach.
+     */
+    InterlockedExchange(&adaptExt->pending_sense_info, PackSenseInfo(&senseInfo));
     DeviceChangeNotification(adaptExt, TRUE);
 }
 
@@ -1477,10 +1485,18 @@ VirtIoHwReinitialize(IN PVOID DeviceExtension)
 
     if (CHECKBIT((old_features ^ adaptExt->features), VIRTIO_BLK_F_RO))
     {
-        adaptExt->sense_info.senseKey = SCSI_SENSE_DATA_PROTECT;
-        adaptExt->sense_info.additionalSenseCode = SCSI_ADSENSE_WRITE_PROTECT;
-        adaptExt->sense_info.additionalSenseCodeQualifier = SCSI_SENSEQ_SPACE_ALLOC_FAILED_WRITE_PROTECT; // SCSI_ADSENSE_NO_SENSE;
-        adaptExt->check_condition = TRUE;
+        SENSE_INFO senseInfo = {0};
+
+        senseInfo.senseKey = SCSI_SENSE_DATA_PROTECT;
+        senseInfo.additionalSenseCode = SCSI_ADSENSE_WRITE_PROTECT;
+        senseInfo.additionalSenseCodeQualifier = SCSI_SENSEQ_SPACE_ALLOC_FAILED_WRITE_PROTECT; // SCSI_ADSENSE_NO_SENSE;
+        /*
+         * Lock-free: unlike StorPortAcquireSpinLock(InterruptLock), this
+         * needs no lock here even though VirtIoStartIo/HwStorAdapterControl
+         * (where this runs) doesn't hold InterruptLock for us - see the
+         * comment in VirtIoConfigUpdated().
+         */
+        InterlockedExchange(&adaptExt->pending_sense_info, PackSenseInfo(&senseInfo));
         DeviceChangeNotification(DeviceExtension, TRUE);
     }
     return TRUE;
@@ -2170,7 +2186,7 @@ VOID CompleteRequestWithStatus(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN UC
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
-    if ((SRB_FUNCTION(Srb) == SRB_FUNCTION_EXECUTE_SCSI) && (adaptExt->check_condition == TRUE) &&
+    if ((SRB_FUNCTION(Srb) == SRB_FUNCTION_EXECUTE_SCSI) && (adaptExt->pending_sense_info != 0) &&
         (status == SRB_STATUS_SUCCESS) && (!CHECKFLAG(SRB_FLAGS(Srb), SRB_FLAGS_DISABLE_AUTOSENSE)))
     {
         PCDB cdb = SRB_CDB(Srb);
@@ -2180,10 +2196,35 @@ VOID CompleteRequestWithStatus(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN UC
             UCHAR OpCode = cdb->CDB6GENERIC.OperationCode;
             if ((OpCode != SCSIOP_INQUIRY) && (OpCode != SCSIOP_REPORT_LUNS))
             {
-                if (SetSenseInfo(DeviceExtension, Srb, &adaptExt->sense_info))
+                /*
+                 * Atomically take the pending notification (0 = none) so at
+                 * most one SRB consumes a given condition even when
+                 * multiple completions race here on different CPUs/queues -
+                 * no lock needed, unlike StorPortAcquireSpinLock(InterruptLock),
+                 * and safe to call from any context, including bIsr-style
+                 * direct-ISR completion.
+                 */
+                LONG packed = InterlockedExchange(&adaptExt->pending_sense_info, 0);
+
+                if (packed != 0)
                 {
-                    status = SRB_STATUS_ERROR | SRB_STATUS_AUTOSENSE_VALID;
-                    adaptExt->check_condition = FALSE;
+                    SENSE_INFO senseInfo;
+
+                    UnpackSenseInfo(packed, &senseInfo);
+                    if (SetSenseInfo(DeviceExtension, Srb, &senseInfo))
+                    {
+                        status = SRB_STATUS_ERROR | SRB_STATUS_AUTOSENSE_VALID;
+                    }
+                    else
+                    {
+                        /*
+                         * This SRB's sense buffer couldn't take it - put the
+                         * notification back for a later SRB instead of
+                         * losing it, unless a newer one has since replaced
+                         * it (then the newer one wins, which is fine).
+                         */
+                        InterlockedCompareExchange(&adaptExt->pending_sense_info, packed, 0);
+                    }
                 }
             }
         }
