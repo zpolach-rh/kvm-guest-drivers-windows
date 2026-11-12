@@ -116,6 +116,10 @@ BOOLEAN
 FORCEINLINE
 SetSenseInfo(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN PSENSE_INFO SenseInfo);
 
+LONG FORCEINLINE PackSenseInfo(IN PSENSE_INFO SenseInfo);
+
+VOID FORCEINLINE UnpackSenseInfo(IN LONG Packed, OUT PSENSE_INFO SenseInfo);
+
 BOOLEAN
 FORCEINLINE
 CompleteDPC(IN PVOID DeviceExtension, IN ULONG MessageID);
@@ -2238,6 +2242,19 @@ SetSenseInfo(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN PSENSE_INFO SenseInf
                  senseInfoBuffer,
                  senseInfoBufferLength);
     return FALSE;
+}
+
+LONG FORCEINLINE PackSenseInfo(IN PSENSE_INFO SenseInfo)
+{
+    return ((LONG)SenseInfo->senseKey << 16) | ((LONG)SenseInfo->additionalSenseCode << 8) |
+           (LONG)SenseInfo->additionalSenseCodeQualifier;
+}
+
+VOID FORCEINLINE UnpackSenseInfo(IN LONG Packed, OUT PSENSE_INFO SenseInfo)
+{
+    SenseInfo->senseKey = (UCHAR)((Packed >> 16) & 0xFF);
+    SenseInfo->additionalSenseCode = (UCHAR)((Packed >> 8) & 0xFF);
+    SenseInfo->additionalSenseCodeQualifier = (UCHAR)(Packed & 0xFF);
 }
 
 BOOLEAN

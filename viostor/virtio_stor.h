@@ -262,6 +262,17 @@ typedef struct _ADAPTER_EXTENSION
     REQUEST_LIST processing_srbs[MAX_CPU];
     ULONG reset_in_progress_count;
     volatile LONG rr_queue_index;
+    /*
+     * Packed SENSE_INFO (senseKey << 16 | additionalSenseCode << 8 |
+     * additionalSenseCodeQualifier) for the check_condition/UNIT_ATTENTION
+     * notification piggybacked onto the next successfully completing SRB;
+     * 0 means none pending. senseKey is never 0 for any condition stored
+     * here, so 0 is a safe sentinel. Set via InterlockedExchange() from
+     * VirtIoConfigUpdated()/VirtIoHwReinitialize(), consumed the same way
+     * from CompleteRequestWithStatus() - see PackSenseInfo()/
+     * UnpackSenseInfo().
+     */
+    volatile LONG pending_sense_info;
     ULONGLONG fw_ver;
 #ifdef DBG
     LONG srb_cnt;
