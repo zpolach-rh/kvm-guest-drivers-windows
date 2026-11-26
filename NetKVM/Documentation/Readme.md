@@ -1,6 +1,7 @@
 # NETKVM: Windows driver for virtio-net network adapter
 
 This README file covers specific features of NETKVM driver package.
+For the developer-oriented design overview, see [NetKVM architecture](ARCHITECTURE.md).
 
 - **[NETKVM configuration tool (netkvmco.dll)](#netkvmco)**
 	- provides means to enumerate, read and change values of NetKVM driver parameters.

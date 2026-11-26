@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 650" role="img" aria-labelledby="title desc">
+<title id="title">NetKVM internal miniport lifecycle</title>
+<desc id="desc">The NetKVM internal adapter state machine, omitting NDIS transitional states, starts in Halted, moves to Paused after initialization, and switches between Paused and Running through Restart and Pause. NDIS device-power requests move Paused to Suspended and Running to FastSuspend, then restore the previous operating state on return to D0. Halt cleanup destroys the context after Paused.</desc>
+<defs>
+  <marker id="normal-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/></marker>
+  <marker id="power-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/></marker>
+</defs>
+<style>
+  text { font-family: Arial, Helvetica, sans-serif; fill: #172334; }
+  .state { fill: #f8fafc; stroke: #475569; stroke-width: 2; }
+  .terminal { fill: #fff; stroke: #64748b; stroke-width: 2; stroke-dasharray: 8 5; }
+  .name { font-size: 21px; font-weight: 700; text-anchor: middle; }
+  .detail { font-size: 14px; fill: #475569; text-anchor: middle; }
+  .note { font-size: 16px; fill: #475569; }
+  .event { font-size: 15px; font-weight: 700; }
+  .normal { fill: none; stroke: #1d4ed8; stroke-width: 3.5; marker-end: url(#normal-arrow); }
+  .power { fill: none; stroke: #b45309; stroke-width: 3.5; marker-end: url(#power-arrow); }
+</style>
+<rect width="1120" height="650" fill="#fff"/>
+<text x="60" y="45" class="note">NetKVM internal states; NDIS transitional states are omitted.</text>
+<path d="M 280 145 H 400" class="normal"/>
+<path d="M 620 125 H 760" class="normal"/>
+<path d="M 760 165 H 620" class="normal"/>
+<path d="M 400 170 H 340 V 435 H 280" class="normal"/>
+<path d="M 455 190 V 390" class="power"/>
+<path d="M 565 390 V 190" class="power"/>
+<path d="M 815 190 V 390" class="power"/>
+<path d="M 925 390 V 190" class="power"/>
+<rect x="60" y="100" width="220" height="90" rx="12" class="state"/>
+<text x="170" y="139" class="name">Halted</text>
+<text x="170" y="165" class="detail">initial context state</text>
+<rect x="400" y="100" width="220" height="90" rx="12" class="state"/>
+<text x="510" y="139" class="name">Paused</text>
+<text x="510" y="165" class="detail">data flows stopped</text>
+<rect x="760" y="100" width="220" height="90" rx="12" class="state"/>
+<text x="870" y="139" class="name">Running</text>
+<text x="870" y="165" class="detail">data flows active</text>
+<rect x="60" y="390" width="220" height="90" rx="12" class="terminal"/>
+<text x="170" y="429" class="name">Context destroyed</text>
+<text x="170" y="455" class="detail">after HaltEx cleanup</text>
+<rect x="400" y="390" width="220" height="90" rx="12" class="state"/>
+<text x="510" y="429" class="name">Suspended</text>
+<text x="510" y="455" class="detail">non-D0 from Paused</text>
+<rect x="760" y="390" width="220" height="90" rx="12" class="state"/>
+<text x="870" y="429" class="name">FastSuspend</text>
+<text x="870" y="455" class="detail">non-D0 from Running</text>
+<text x="286" y="128" class="event">InitializeEx</text>
+<text x="647" y="109" class="event">Restart</text>
+<text x="670" y="194" class="event">Pause</text>
+<text x="153" y="372" class="event">HaltEx</text>
+<text x="358" y="300" class="event">PowerOff</text>
+<text x="579" y="300" class="event">PowerOn</text>
+<text x="718" y="300" class="event">PowerOff</text>
+<text x="940" y="300" class="event">PowerOn</text>
+<text x="60" y="540" class="note">Orange arrows: NDIS device-power request (non-D0 / D0), also used during reset.</text>
+<text x="60" y="570" class="note">Shutdown, SurpriseRemoved, and NeedsReset are exceptional states described below.</text>
+<text x="60" y="602" class="note">“Context destroyed” is an endpoint, not a CMiniportStateMachine enum value.</text>
+</svg>
